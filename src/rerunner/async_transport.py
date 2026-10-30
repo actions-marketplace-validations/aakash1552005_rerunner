@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 import threading
 import time
@@ -20,7 +20,13 @@ from rerunner.matcher import (
     normalize_headers,
 )
 from rerunner.models import CassetteEntry, RecordedRequest, RecordedResponse
-from rerunner.sanitizer import sanitize_body, sanitize_headers, sanitize_string, sanitize_url
+from rerunner.sanitizer import (
+    PiiRedactor,
+    sanitize_body,
+    sanitize_headers,
+    sanitize_string,
+    sanitize_url,
+)
 
 
 def _is_event_stream(headers: httpx.Headers) -> bool:
@@ -68,6 +74,7 @@ class _RecordingAsyncByteStream(httpx.AsyncByteStream):
         request_key: str,
         body_bytes: bytes,
         record_partial_streams: bool = False,
+        pii_redactor: PiiRedactor | None = None,
     ) -> None:
         self.real_response = real_response
         self.request = request
@@ -76,6 +83,7 @@ class _RecordingAsyncByteStream(httpx.AsyncByteStream):
         self.request_key = request_key
         self.body_bytes = body_bytes
         self.record_partial_streams = record_partial_streams
+        self.pii_redactor = pii_redactor
         self.chunks: list[bytes] = []
         self.chunk_delays_ms: list[float] = []
         self._last_chunk_time: float | None = None
@@ -132,16 +140,25 @@ class _RecordingAsyncByteStream(httpx.AsyncByteStream):
             return
 
         response_bytes = b"".join(self.chunks)
-        cleaned_headers = sanitize_headers(normalize_headers(dict(self.request.headers)))
-        cleaned_url = sanitize_url(str(self.request.url))
-        cleaned_req_body = sanitize_body(normalize_body(self.body_bytes))
-        cleaned_resp_body = sanitize_body(response_bytes.decode("utf-8", errors="replace"))
+        cleaned_headers = sanitize_headers(
+            normalize_headers(dict(self.request.headers)), pii_redactor=self.pii_redactor
+        )
+        cleaned_url = sanitize_url(str(self.request.url), pii_redactor=self.pii_redactor)
+        cleaned_req_body = sanitize_body(
+            normalize_body(self.body_bytes), pii_redactor=self.pii_redactor
+        )
+        cleaned_resp_body = sanitize_body(
+            response_bytes.decode("utf-8", errors="replace"), pii_redactor=self.pii_redactor
+        )
 
         cleaned_chunks = [
-            sanitize_string(chunk.decode("utf-8", errors="replace")) for chunk in self.chunks
+            sanitize_string(chunk.decode("utf-8", errors="replace"), pii_redactor=self.pii_redactor)
+            for chunk in self.chunks
         ]
 
-        cleaned_resp_headers = sanitize_headers(dict(self.real_response.headers))
+        cleaned_resp_headers = sanitize_headers(
+            dict(self.real_response.headers), pii_redactor=self.pii_redactor
+        )
         cleaned_resp_headers.pop("content-encoding", None)
         cleaned_resp_headers.pop("content-length", None)
 
@@ -188,6 +205,9 @@ class AsyncCassetteTransport(httpx.AsyncBaseTransport):
         record_partial_streams: bool = False,
         matching_strategy: MatchingStrategy = "strict",
         cassette: Cassette | None = None,
+        pii_redactor: PiiRedactor | None = None,
+        semantic_threshold: float = 0.80,
+        embedding_fn: Callable[[str], list[float]] | None = None,
     ) -> None:
         if chunk_delay_ms < 0:
             raise ValueError("chunk_delay_ms must be non-negative")
@@ -199,6 +219,9 @@ class AsyncCassetteTransport(httpx.AsyncBaseTransport):
         self.chunk_delay_ms = chunk_delay_ms
         self.record_partial_streams = record_partial_streams
         self.matching_strategy: MatchingStrategy = matching_strategy
+        self.pii_redactor = pii_redactor
+        self.semantic_threshold = semantic_threshold
+        self.embedding_fn = embedding_fn
         self._step_lock = threading.Lock()
         self._step_counter = 0
         self._active_recording_streams: list[_RecordingAsyncByteStream] = []
@@ -242,7 +265,15 @@ class AsyncCassetteTransport(httpx.AsyncBaseTransport):
                     f"Cassette file not found in replay mode: {self.cassette_path}"
                 )
 
-            match = self.cassette.find_http_match(request_key)
+            match = self.cassette.find_http_match(
+                request_key,
+                strategy=self.matching_strategy,
+                incoming_method=request.method,
+                incoming_url=str(request.url),
+                incoming_body=body_bytes,
+                semantic_threshold=self.semantic_threshold,
+                embedding_fn=self.embedding_fn,
+            )
             if match is None or match.response is None:
                 raise CassetteError(
                     f"[Async Step {current_step}] No cassette match found in replay mode for "
@@ -286,6 +317,7 @@ class AsyncCassetteTransport(httpx.AsyncBaseTransport):
                 request_key=request_key,
                 body_bytes=body_bytes,
                 record_partial_streams=self.record_partial_streams,
+                pii_redactor=self.pii_redactor,
             )
             self._active_recording_streams.append(stream)
             return httpx.Response(
@@ -298,12 +330,18 @@ class AsyncCassetteTransport(httpx.AsyncBaseTransport):
         response_bytes = await real_response.aread()
 
         # Sanitize headers, url, and body before writing to disk
-        cleaned_headers = sanitize_headers(normalize_headers(dict(request.headers)))
-        cleaned_url = sanitize_url(str(request.url))
-        cleaned_req_body = sanitize_body(normalize_body(body_bytes))
-        cleaned_resp_body = sanitize_body(response_bytes.decode("utf-8", errors="replace"))
+        cleaned_headers = sanitize_headers(
+            normalize_headers(dict(request.headers)), pii_redactor=self.pii_redactor
+        )
+        cleaned_url = sanitize_url(str(request.url), pii_redactor=self.pii_redactor)
+        cleaned_req_body = sanitize_body(normalize_body(body_bytes), pii_redactor=self.pii_redactor)
+        cleaned_resp_body = sanitize_body(
+            response_bytes.decode("utf-8", errors="replace"), pii_redactor=self.pii_redactor
+        )
 
-        cleaned_resp_headers = sanitize_headers(dict(real_response.headers))
+        cleaned_resp_headers = sanitize_headers(
+            dict(real_response.headers), pii_redactor=self.pii_redactor
+        )
         cleaned_resp_headers.pop("content-encoding", None)
         cleaned_resp_headers.pop("content-length", None)
 
