@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "rerunner"
-version = "0.3.1"
+version = "0.3.2"
 description = "Deterministic flight recorder, replay engine, and CI test runner for AI agents."
 readme = "README.md"
 license = "Apache-2.0"
@@ -90,6 +90,13 @@ presidio = [
 ]
 sether = [
     "sether>=0.4.1",
+]
+docs = [
+    "mkdocs>=1.6.0",
+    "mkdocs-material>=9.5.0",
+]
+ed25519 = [
+    "cryptography>=42.0.0",
 ]
 dev = [
     "pytest>=8.0.0",
@@ -184,10 +191,11 @@ name = "Clean inward dependency layers"
 type = "layers"
 layers = [
     "rerunner.cli | rerunner.pytest_plugin",
-    "rerunner.integrations | rerunner.eval_exporter | rerunner.otel | rerunner.reports",
+    "rerunner.mcp_server | rerunner.setup_wizard | rerunner.proxy_server | rerunner.integrations | rerunner.eval_exporter | rerunner.otel | rerunner.reports",
     "rerunner.session",
     "rerunner.transport | rerunner.async_transport | rerunner.patcher",
-    "rerunner.side_effects",
+    "rerunner.patchers",
+    "rerunner.side_effects | rerunner.cassette_ops",
     "rerunner.cassette",
     "rerunner.matcher | rerunner.storage",
     "rerunner.integrity",
@@ -205,6 +213,7 @@ source_modules = [
     "rerunner.storage",
     "rerunner.cassette",
     "rerunner.side_effects",
+    "rerunner.cassette_ops",
 ]
 forbidden_modules = [
     "httpx",
