@@ -23,6 +23,7 @@ from rerunner.cassette_ops import (
     scrub_cassette_file,
     verify_cassette_report,
 )
+from rerunner.config import DEFAULT_CASSETTE_DIR, config_cassette_dir
 from rerunner.integrity import (
     compute_merkle_root,
     generate_ed25519_keypair,
@@ -574,7 +575,7 @@ def doctor(
     rec_mode = os.getenv("RERUNNER_RECORD_MODE", "once")
     table.add_row("Config", "RERUNNER_RECORD_MODE", "[bold green]✔ Set[/]", f"Mode: '{rec_mode}'")
 
-    cass_dir = os.getenv("RERUNNER_CASSETTE_DIR", ".rerunner/cassettes")
+    cass_dir = os.getenv("RERUNNER_CASSETTE_DIR") or config_cassette_dir() or DEFAULT_CASSETTE_DIR
     table.add_row("Config", "RERUNNER_CASSETTE_DIR", "[bold green]✔ Set[/]", f"Path: '{cass_dir}'")
 
     hmac_key = os.getenv("RERUNNER_HMAC_KEY")
@@ -964,10 +965,17 @@ def merge(
         "--deduplicate",
         help="Remove duplicate HTTP/tool steps while preserving first occurrence order.",
     ),
+    verify_all: bool = typer.Option(
+        False,
+        "--verify-all/--no-verify-all",
+        help="Abort with exit code 1 if any input shard fails SHA-256/HMAC integrity verification.",
+    ),
 ) -> None:
     """Merge multiple cassettes into one re-numbered, SHA-256 re-signed cassette."""
     try:
-        result = merge_cassettes(inputs, output_path, deduplicate=deduplicate)
+        result = merge_cassettes(
+            inputs, output_path, deduplicate=deduplicate, verify_all=verify_all
+        )
     except Exception as exc:
         console.print(f"[bold red]Merge failed:[/] {exc}")
         raise typer.Exit(code=1) from exc
@@ -1013,6 +1021,11 @@ def serve(
         "--simulate-latency",
         help="Replay recorded SSE chunk delays in real time.",
     ),
+    cors_origin: str | None = typer.Option(
+        None,
+        "--cors-origin",
+        help="Access-Control-Allow-Origin value for browser agents (e.g. '*' or 'http://localhost:3000'). Disabled by default.",
+    ),
 ) -> None:
     """Start a cross-language HTTP/SSE replay proxy for TypeScript, Go, Rust, or browser agents."""
     if strategy not in ("strict", "content", "fuzzy", "semantic"):
@@ -1028,6 +1041,7 @@ def serve(
             upstream_url=upstream,
             matching_strategy=strategy,  # type: ignore[arg-type]
             simulate_latency=simulate_latency,
+            cors_origin=cors_origin,
         )
     except Exception as exc:
         console.print(f"[bold red]Failed to start proxy server:[/] {exc}")
@@ -1063,7 +1077,7 @@ def setup(
         "claude-project",
         "--clients",
         "-c",
-        help="Comma-separated agent clients (claude-project,claude,cursor,codex,all).",
+        help="Comma-separated agent clients (claude-project,claude,cursor,codex,windsurf,cline,all).",
     ),
     project_dir: Path | None = typer.Option(
         None,
@@ -1093,7 +1107,7 @@ def setup(
         help="Do not create .bak files before modifying existing configs.",
     ),
 ) -> None:
-    """Configure coding-agent MCP integration (Claude Code, Cursor, Codex)."""
+    """Configure coding-agent MCP integration (Claude Code, Cursor, Codex, Windsurf, Cline)."""
     try:
         planned = configure_clients(
             clients,
